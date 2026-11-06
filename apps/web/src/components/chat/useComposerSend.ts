@@ -45,6 +45,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { type SetStateAction, useLayoutEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
+import { readLocalApi } from "../../localApi";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -118,6 +119,8 @@ import {
   resolveMultipleModelTargets,
   prepareTurnAttachments,
   restoreComposerDraft,
+  recoverComposerSend,
+  startThreadSubmission,
 } from "./chatViewSend";
 import type {
   EnvironmentProject,
@@ -379,7 +382,7 @@ export function useComposerSend(input: ComposerSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   });
-  const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
+  const { sendInFlight: sendInFlightRef, uncertainSubmissions } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
@@ -1277,29 +1280,41 @@ export function useComposerSend(input: ComposerSendInput) {
           ? scopeThreadRef(environmentId, threadIdForSend)
           : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      const startPromise = startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            attachments: turnAttachmentsResult.value,
-            ...withMessageContext({
-              text: outgoingMessageText,
-              context: buildOutgoingMessageContext(
-                boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
-              ),
-            }),
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode: sendInteractionMode,
-          dispatchMode: turnDispatchMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        },
+      const startPromise = startThreadSubmission({
+        retryKey: routeThreadKey,
+        model: ctxSelectedModel,
+        threadId: threadIdForSend,
+        uncertainSubmissions: uncertainSubmissions.current,
+        openThread: (threadId) =>
+          void navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
+          }),
+        start: () =>
+          startThreadTurn({
+            environmentId,
+            input: {
+              threadId: threadIdForSend,
+              message: {
+                messageId: messageIdForSend,
+                role: "user",
+                attachments: turnAttachmentsResult.value,
+                ...withMessageContext({
+                  text: outgoingMessageText,
+                  context: buildOutgoingMessageContext(
+                    boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
+                  ),
+                }),
+              },
+              modelSelection: ctxSelectedModelSelection,
+              titleSeed: title,
+              runtimeMode,
+              interactionMode: sendInteractionMode,
+              dispatchMode: turnDispatchMode,
+              ...(bootstrap ? { bootstrap } : {}),
+              createdAt: messageCreatedAt,
+            },
+          }),
       });
       if (backgroundThreadRef) {
         try {
@@ -1382,21 +1397,22 @@ export function useComposerSend(input: ComposerSendInput) {
         );
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
-      if (
-        !composerDraftHasUserContent(
-          useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
-        )
-      ) {
-        setOptimisticUserMessages((existing) => {
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
-        });
-        // The restored draft clones its images, so the sent copies are no longer used.
-        optimisticBlobPreviews.release(optimisticMessage);
-        const retryComposerImages = restoreComposerDraft(composerDraftTarget, sendSnapshot);
+      const retryComposerImages = recoverComposerSend({
+        draftTarget: composerDraftTarget,
+        snapshot: sendSnapshot,
+        discardOptimisticMessage: () => {
+          setOptimisticUserMessages((existing) => {
+            const next = existing.filter((message) => message.id !== messageIdForSend);
+            return next.length === existing.length ? existing : next;
+          });
+          // The restored draft clones its images, so the sent copies are no longer used.
+          optimisticBlobPreviews.release(optimisticMessage);
+        },
+      });
+      const restoreInView = (images: ComposerImageAttachment[]) => {
         if (currentRouteThreadKeyRef.current === routeThreadKey) {
           promptRef.current = messageTextForSend;
-          composerImagesRef.current = retryComposerImages;
+          composerImagesRef.current = images;
           composerFilesRef.current = composerFilesSnapshot;
           composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
           composerRef.current?.resetCursorState({
@@ -1405,6 +1421,35 @@ export function useComposerSend(input: ComposerSendInput) {
             detectTrigger: true,
           });
         }
+      };
+      if (retryComposerImages !== null) {
+        restoreInView(retryComposerImages);
+      } else {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not confirm message delivery",
+            description: "Your newer draft was kept. You can restore the failed message.",
+            timeout: 0,
+            actionProps: {
+              children: "Restore message",
+              onClick: () => {
+                void (async () => {
+                  if (
+                    composerDraftHasUserContent(
+                      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
+                    ) &&
+                    !(await readLocalApi()?.dialogs.confirm(
+                      "Replace the current draft with the message that failed to send?",
+                    ))
+                  )
+                    return;
+                  restoreInView(restoreComposerDraft(composerDraftTarget, sendSnapshot));
+                })();
+              },
+            },
+          }),
+        );
       }
       if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);

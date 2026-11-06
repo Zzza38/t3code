@@ -469,9 +469,18 @@ const make = Effect.gen(function* () {
             branch,
             worktreePath,
           })
-          .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+          .pipe(
+            Effect.mapError(mapError(input, "update-thread", threadId)),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                workspaceRecorded = true;
+              }),
+            ),
+            Effect.uninterruptible,
+          );
+      } else {
+        workspaceRecorded = true;
       }
-      workspaceRecorded = true;
 
       if (
         reused === undefined &&
@@ -670,28 +679,14 @@ const make = Effect.gen(function* () {
             yield* terminals
               .close({ threadId, terminalId: setupTerminalId, deleteHistory: true })
               .pipe(Effect.ignore);
-          if (
-            tracked &&
-            createdWorktreePath &&
-            ((cancelled && !runReleased) || !workspaceRecorded)
-          ) {
-            if (branchRename !== null) yield* Fiber.interrupt(branchRename);
+          if (cancelled && !runReleased && branchRename !== null)
+            yield* Fiber.interrupt(branchRename);
+          // Published worktrees can already belong to another run when cancellation reaches cleanup.
+          if (tracked && createdWorktreePath && !workspaceRecorded) {
             const removedPath = createdWorktreePath;
-            // Forget worktrees only after removal succeeds; failed removals must not reuse partially written checkouts.
             yield* git
               .removeWorktree({ cwd: project.workspaceRoot, path: removedPath, force: true })
               .pipe(
-                Effect.andThen(
-                  threads
-                    .dispatch({
-                      type: "thread.metadata.update",
-                      commandId: CommandId.make(`${input.commandId}:cancel-workspace`),
-                      threadId,
-                      worktreePath: null,
-                      branch: null,
-                    })
-                    .pipe(Effect.ignore),
-                ),
                 Effect.catchCause((removeCause) =>
                   Effect.logWarning("Failed to remove an abandoned thread worktree", {
                     commandId: input.commandId,

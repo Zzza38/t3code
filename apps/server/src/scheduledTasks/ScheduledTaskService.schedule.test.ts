@@ -5,6 +5,7 @@ import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -17,6 +18,78 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
+
+it.effect("does not overwrite a schedule edited while a due sweep dispatches another task", () =>
+  Effect.gen(function* () {
+    const tick = yield* Deferred.make<Effect.Effect<void>>();
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const morning = DateTime.makeZonedUnsafe(
+      { year: 2026, month: 7, day: 1, hour: 8, minute: 0 },
+      { timeZone: DateTime.zoneMakeLocal(), adjustForTimeZone: true },
+    );
+    yield* TestClock.setTime(DateTime.toEpochMillis(morning));
+    const dependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Layer.succeed(Scheduler.Scheduler, {
+        register: <E, R>(_name: string, work: Effect.Effect<void, E, R>) =>
+          Effect.context<R>().pipe(
+            Effect.flatMap((context) =>
+              Deferred.succeed(tick, Effect.provideContext(work, context).pipe(Effect.orDie)),
+            ),
+            Effect.asVoid,
+          ),
+      }),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as({ threadId: "thread-sweep", resumed: false } as never),
+          ),
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const base = {
+        title: "Sweep task",
+        prompt: "Review",
+        enabled: true,
+        projectId: "project-sweep",
+        workspaceStrategy: { type: "root" },
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      };
+      yield* service.upsert(
+        yield* decodeUpsertInput({ ...base, schedule: { type: "interval", everyMs: 60_000 } }),
+      );
+      const input = yield* decodeUpsertInput({
+        ...base,
+        schedule: { type: "fixed_time", timeOfDay: "09:00" },
+      });
+      const created = yield* service.upsert(input);
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.add(morning, { hours: 4 })));
+      const sweep = yield* Effect.forkChild(yield* Deferred.await(tick));
+      yield* Deferred.await(entered);
+      const edited = yield* service.upsert({
+        ...input,
+        id: created.task.id,
+        schedule: { type: "fixed_time", timeOfDay: "15:00" },
+      });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(sweep);
+      const current = (yield* service.list()).tasks.find((task) => task.id === created.task.id);
+      expect(current?.nextRunAt).toBe(edited.task.nextRunAt);
+      expect(current?.schedule).toEqual(edited.task.schedule);
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
 
 it.effect("rejects a stale form save after deletion while preserving explicit-id creates", () =>
   Effect.gen(function* () {
