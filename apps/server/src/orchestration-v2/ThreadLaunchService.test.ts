@@ -2059,7 +2059,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
 
-it.effect("cancels tracked setup before provider work is released", () =>
+it.effect("cancels tracked setup without deleting its recorded worktree", () =>
   Effect.gen(function* () {
     const entered = yield* Deferred.make<void>();
     const harness = makeHarness({
@@ -2083,7 +2083,8 @@ it.effect("cancels tracked setup before provider work is released", () =>
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
       const projection = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(projection.runs[0]?.status, "failed");
-      assert.isNull(projection.thread.worktreePath);
+      assert.equal(projection.thread.worktreePath, "/repo-worktrees/feature");
+      assert.isEmpty(harness.removeWorktree.mock.calls);
       assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
     }).pipe(Effect.provide(harness.layer));
   }),
@@ -2132,7 +2133,10 @@ it.effect("stops an in-flight branch rename when tracked setup is cancelled", ()
         "the cancelled setup's branch rename kept running",
       );
       assert.equal(harness.renameBranch.mock.calls.length, 0);
-      assert.isNull((yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath);
+      assert.equal(
+        (yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath,
+        "/repo-worktrees/feature",
+      );
     }).pipe(Effect.provide(harness.layer));
   }),
 );

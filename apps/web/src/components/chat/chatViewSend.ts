@@ -11,7 +11,8 @@ import {
   wasBootstrapThreadDeleted,
   wasBootstrapThreadNotCreated,
 } from "@t3tools/client-runtime/errors";
-import { Atom } from "effect/reactivity";
+import * as Cause from "effect/Cause";
+import { AsyncResult, Atom } from "effect/reactivity";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
@@ -27,6 +28,7 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   useComposerDraftStore,
+  composerDraftHasUserContent,
   DraftId,
 } from "../../composerDraftStore";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
@@ -68,22 +70,22 @@ export function draftSendState(routeKey: string) {
 }
 
 /**
- * Starts one thread of a multiple-model send. A request that may have
- * reached the server before failing is remembered by `retryKey`, so sending
- * again cannot silently create a duplicate thread; its failure toast offers
- * to open that thread or to allow the retry.
+ * A lost acknowledgement may leave work running. Keep its thread available
+ * and require an explicit retry before submitting more work.
  */
-export async function startFanoutThread(input: {
+export async function startThreadSubmission(input: {
   readonly retryKey: string;
   readonly model: string;
+  readonly threadId?: ThreadId;
   readonly uncertainSubmissions: Map<string, ThreadId>;
   readonly start: (threadId: ThreadId) => Promise<AtomCommandResult<unknown, unknown>>;
   readonly openThread: (threadId: ThreadId) => void;
-}): Promise<boolean> {
+}): Promise<AtomCommandResult<unknown, unknown>> {
   const { retryKey, uncertainSubmissions } = input;
   const uncertainThreadId = uncertainSubmissions.get(retryKey);
-  const targetThreadId = uncertainThreadId ?? newThreadId();
+  const targetThreadId = uncertainThreadId ?? input.threadId ?? newThreadId();
   let requestMayHaveStarted = false;
+  let failure: AtomCommandResult<unknown, unknown> | undefined;
   try {
     if (uncertainThreadId) {
       throw new Error(
@@ -93,13 +95,14 @@ export async function startFanoutThread(input: {
     requestMayHaveStarted = true;
     const result = await input.start(targetThreadId);
     if (result._tag === "Failure") {
+      failure = result;
       const error = squashAtomCommandFailure(result);
       if (wasBootstrapThreadDeleted(error) || wasBootstrapThreadNotCreated(error)) {
         requestMayHaveStarted = false;
       }
       throw error;
     }
-    return true;
+    return result;
   } catch (error) {
     if (requestMayHaveStarted && !uncertainSubmissions.has(retryKey)) {
       uncertainSubmissions.set(retryKey, targetThreadId);
@@ -119,7 +122,7 @@ export async function startFanoutThread(input: {
                   onClick: () => {
                     void readLocalApi()
                       ?.dialogs.confirm(
-                        "The previous request may already be running. Check its thread first. Allow another send that could create a duplicate thread?",
+                        "The previous request may already be running. Check its thread first. Allow another send that could repeat the same work?",
                       )
                       .then(
                         (confirmed) => {
@@ -144,7 +147,7 @@ export async function startFanoutThread(input: {
           : {}),
       }),
     );
-    return false;
+    return failure ?? AsyncResult.failure(Cause.fail(error));
   }
 }
 
@@ -271,6 +274,22 @@ export function restoreComposerDraft(
   store.setThreadContexts(draftTarget, snapshot.threadContexts);
   store.setEnvironmentContexts(draftTarget, snapshot.environmentContexts);
   return images;
+}
+
+export function recoverComposerSend(input: {
+  readonly draftTarget: ScopedThreadRef | DraftId;
+  readonly snapshot: ComposerSendSnapshot;
+  readonly discardOptimisticMessage: () => void;
+}): ComposerImageAttachment[] | null {
+  input.discardOptimisticMessage();
+  if (
+    composerDraftHasUserContent(
+      useComposerDraftStore.getState().getComposerDraft(input.draftTarget),
+    )
+  ) {
+    return null;
+  }
+  return restoreComposerDraft(input.draftTarget, input.snapshot);
 }
 
 export interface MultipleModelTarget {

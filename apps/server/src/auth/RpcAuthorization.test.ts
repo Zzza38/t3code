@@ -1,4 +1,6 @@
 import {
+  AuthAccessWriteScope,
+  GuestShareCreateError,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -131,6 +133,54 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("requires thread read access as well as access management to create a guest link", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.guestShareCreate> =>
+          tag !== WS_METHODS.guestShareCreate,
+      ),
+    );
+    for (const scopes of [
+      [AuthAccessWriteScope],
+      [AuthOrchestrationReadScope],
+      [AuthAccessWriteScope, AuthOrchestrationReadScope],
+    ]) {
+      let handled = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.guestShareCreate, () =>
+              Effect.suspend(() => {
+                handled = true;
+                return Effect.fail(new GuestShareCreateError({ reason: "disabled" }));
+              }),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+      const result = yield* client[WS_METHODS.guestShareCreate]({
+        threadId: ThreadId.make("guest-thread"),
+      }).pipe(Effect.flip);
+      if (scopes.length === 2) {
+        expect(result._tag).toBe("GuestShareCreateError");
+        expect(handled).toBe(true);
+        continue;
+      }
+      expect(result).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: scopes.includes(AuthAccessWriteScope)
+          ? AuthOrchestrationReadScope
+          : AuthAccessWriteScope,
+      });
+      expect(handled).toBe(false);
+    }
+  }).pipe(Effect.scoped),
+);
 
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(

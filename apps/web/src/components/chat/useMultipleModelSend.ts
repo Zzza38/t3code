@@ -37,7 +37,7 @@ import {
   type MultipleModelTarget,
   type prepareTurnAttachments,
   restoreComposerDraft,
-  startFanoutThread,
+  startThreadSubmission,
 } from "./chatViewSend";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
 
@@ -149,7 +149,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
       setThreadError(threadId, null);
       const starts = Promise.all(
         targets.map(async (target) => {
-          const started = await startFanoutThread({
+          const started = await startThreadSubmission({
             retryKey: JSON.stringify([
               routeThreadKey,
               target.selection.instanceId,
@@ -204,7 +204,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                 params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
               }),
           });
-          if (started) startedCount += 1;
+          if (started._tag === "Success") startedCount += 1;
           else failedSelections.push(target.selection);
         }),
       );
