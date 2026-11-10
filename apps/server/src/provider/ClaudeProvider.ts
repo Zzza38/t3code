@@ -647,6 +647,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         }).limits;
   const resetCredits =
     resolveResetCredits &&
+    !customApiEndpoint &&
     capabilities.subscriptionType &&
     !usageLimits.unavailable &&
     parsedVersion

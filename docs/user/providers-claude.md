@@ -75,6 +75,19 @@ Claude Code holds the turn until that window reopens, so it can keep showing as
 working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
 
+## Gateway account usage
+
+For a gateway that implements `GET /api/oauth/usage`, set `T3_CLAUDE_USAGE_URL`
+to that endpoint in the Claude instance's environment variables, or in the `env`
+object of its `settings.json`. It must match the configured `ANTHROPIC_BASE_URL`
+with `/api/oauth/usage` appended. T3 uses the existing `ANTHROPIC_AUTH_TOKEN` or
+`ANTHROPIC_API_KEY` to read it.
+
+Enable this only after the gateway endpoint is deployed. Reload the provider to
+load the setting. T3 shows the gateway's usage windows and omits reset credits and
+spend. Direct Anthropic instances keep using Claude Code's native usage read.
+This setting does not change the native Claude CLI's usage panel.
+
 ## Skills
 
 Claude skills come from the config directory's `skills` folder and the project's
