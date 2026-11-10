@@ -468,6 +468,76 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.live(
+    "reads Claude gateway usage into the actual provider snapshot without native reset credits",
+    () =>
+      Effect.gen(function* () {
+        if (yield* HostProcess.isWindows) return;
+        const fixtures = yield* makeTildeProviderFixtures();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fs.writeFileString(
+          path.join(fixtures.claudeHomePath, "settings.json"),
+          JSON.stringify({
+            env: {
+              ANTHROPIC_BASE_URL: "https://gateway.example",
+              ANTHROPIC_AUTH_TOKEN: "gateway-token",
+              T3_CLAUDE_USAGE_URL: "https://gateway.example/api/oauth/usage",
+            },
+          }),
+        );
+        const requests: string[] = [];
+        const client = HttpClient.make((request) => {
+          requests.push(request.url);
+          if (request.url === "https://gateway.example/api/oauth/usage") {
+            expect(request.headers.authorization).toBe("Bearer gateway-token");
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  five_hour: { utilization: 50, resets_at: "2026-11-11T00:00:00Z" },
+                  seven_day: null,
+                }),
+              ),
+            );
+          }
+          expect(request.url).not.toContain("api.anthropic.com");
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" })),
+          );
+        });
+        const claudeId = ProviderInstanceId.make("claude_gateway_usage");
+        const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+          drivers: [ClaudeDriver],
+          configMap: {
+            [claudeId]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              enabled: true,
+              config: makeClaudeConfig({
+                enabled: true,
+                binaryPath: fixtures.claudeBinaryPath,
+                homePath: fixtures.claudeHomePath,
+              }),
+            },
+          },
+        }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+        const instance = yield* registry.getInstance(claudeId);
+        const snapshot = yield* instance!.snapshot.refresh;
+        expect(snapshot.usageLimits?.windows).toEqual([
+          {
+            id: "five_hour",
+            kind: "session",
+            label: "Session",
+            usedPercent: 50,
+            windowDurationMins: 300,
+            resetsAt: "2026-11-11T00:00:00.000Z",
+          },
+        ]);
+        expect(snapshot.usageLimits?.resetCredits).toBeUndefined();
+        expect(requests).toContain("https://gateway.example/api/oauth/usage");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("scopes Claude's one-probe fallback to the logged-in organization", () =>
     Effect.gen(function* () {
       if (yield* HostProcess.isWindows) return;
