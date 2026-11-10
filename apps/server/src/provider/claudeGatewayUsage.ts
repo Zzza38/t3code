@@ -37,6 +37,7 @@ export const resolveClaudeGatewayUsage = Effect.fn("resolveClaudeGatewayUsage")(
   const usageUrl = env.T3_CLAUDE_USAGE_URL?.trim();
   if (!usageUrl) return undefined;
   const base = URL.parse(env.ANTHROPIC_BASE_URL?.trim() ?? "");
+  if (base?.hostname === "api.anthropic.com") return undefined;
   const usage = URL.parse(usageUrl);
   const token = (env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY)?.trim();
   if (

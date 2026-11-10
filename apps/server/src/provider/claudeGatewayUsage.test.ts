@@ -29,7 +29,7 @@ it.layer(NodeServices.layer)("Claude gateway usage", (it) => {
           ...env,
           ANTHROPIC_BASE_URL: "https://api.anthropic.com",
         }),
-      ).toBeNull();
+      ).toBeUndefined();
       expect(
         yield* resolveClaudeGatewayUsage(home, {
           ...env,
