@@ -2443,7 +2443,14 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.remove(`${index.trim()}.lock`);
         const gitFile = yield* fs.readFileString(`${worktree}/.git`);
         yield* fs.writeFileString(`${worktree}/.git`, "gitdir: /missing-git-directory\n");
-        expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        const invalidGitFile = (yield* service.runNow).entries[0];
+        if (invalidGitFile?.outcome === "failed") {
+          // Git 2.56 reports invalid worktree gitfiles as fatal errors.
+          expect(invalidGitFile.reason).toContain("gitfile does not point to a valid repository");
+        } else {
+          expect(invalidGitFile).toMatchObject(changed);
+        }
+        expect(yield* fs.exists(worktree)).toBe(true);
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);
