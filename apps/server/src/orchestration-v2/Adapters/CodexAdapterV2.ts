@@ -764,6 +764,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
   function* (input: {
     readonly nativeThreadId: string;
     readonly codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>;
+    readonly resumeInterruptedTask?: boolean;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly modelSelection: ModelSelection;
     readonly hasT3Mcp?: boolean;
@@ -814,7 +815,15 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
         : { ...t3Context, ...appContext };
     return yield* decodeCodexTurnStartParamsWithCollaborationMode({
       threadId: input.nativeThreadId,
-      input: input.codexInput,
+      input:
+        input.codexInput.length > 0 || !input.resumeInterruptedTask
+          ? input.codexInput
+          : [
+              {
+                type: "text",
+                text: "Continue the interrupted task from the saved context and original instructions.",
+              },
+            ],
       ...(additionalContext ? { additionalContext } : {}),
       cwd: input.runtimePolicy.cwd,
       model: input.modelSelection.model,
@@ -6897,6 +6906,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
+              resumeInterruptedTask:
+                turnInput.restartContinuationOfRunId !== undefined ||
+                parseGoalCommand(turnInput.message)?.type === "resume",
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasT3Mcp: mcpSession !== undefined,
@@ -6922,7 +6934,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(yield* Ref.get(settledTurns)),
               ...(yield* Ref.get(activeTurns)),
             ]);
-            const started = yield* client.request("turn/start", turnStartParams);
+            let started = yield* client.request("turn/start", turnStartParams);
             const previousTurn =
               previousTurns.get(started.turn.id) ??
               (yield* Ref.get(activeTurns)).get(started.turn.id);
@@ -6930,11 +6942,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               previousTurn !== undefined &&
               previousTurn.input.attemptId !== turnInput.attemptId
             ) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CODEX_PROVIDER,
-                detail:
-                  "Codex returned a turn belonging to an earlier run. Stop the existing turn before retrying this message.",
-              });
+              if (started.turn.startedAt === null && started.turn.status === "inProgress") {
+                const completed = yield* Deferred.make<void>();
+                yield* Ref.update(turnWaiters, (current) =>
+                  new Map(current).set(started.turn.id, completed),
+                );
+                yield* Effect.gen(function* () {
+                  if ((yield* Ref.get(activeTurns)).get(started.turn.id) === previousTurn) {
+                    yield* client.request("turn/interrupt", { threadId, turnId: started.turn.id });
+                    yield* Deferred.await(completed);
+                  }
+                }).pipe(
+                  Effect.ensuring(
+                    Ref.update(turnWaiters, (current) => {
+                      const next = new Map(current);
+                      next.delete(started.turn.id);
+                      return next;
+                    }),
+                  ),
+                );
+                started = yield* client.request("turn/start", turnStartParams);
+              }
+              if (previousTurns.has(started.turn.id)) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail:
+                    "Codex returned a turn belonging to an earlier run. Stop the existing turn before retrying this message.",
+                });
+              }
             }
             // A turn/started notification may have registered and completed this turn already.
             if ((yield* Ref.get(pendingRootTurns)).get(threadId) !== turnInput) return;
